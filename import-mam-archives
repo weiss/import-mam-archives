@@ -1,0 +1,75 @@
+#!/usr/bin/env escript
+%%! -sname import@localhost
+
+% NOTE: If the node name of your server is not 'ejabberd@localhost' (see the
+% "ejabberdctl status" output), you must change the @localhost part of the node
+% names above and below.
+
+-define(NODE, 'ejabberd@localhost').
+
+% Copyright (c) 2016 Holger Weiss <holger@zedat.fu-berlin.de>.
+%
+% Permission to use, copy, modify, and/or distribute this software for any
+% purpose with or without fee is hereby granted, provided that the above
+% copyright notice and this permission notice appear in all copies.
+%
+% THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+% REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+% AND FITNESS.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+% INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+% LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+% OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+% PERFORMANCE OF THIS SOFTWARE.
+
+-record(archive_msg, {us, id, timestamp, peer, bare_peer, packet, nick, type}).
+-record(mam_msg, {key, time, route, from, to, stanza}).
+
+get_timestamp() ->
+    calendar:datetime_to_gregorian_seconds(calendar:universal_time()).
+
+main(_Args) ->
+    TabDef = [{disc_only_copies, [?NODE]},
+	      {type, bag},
+	      {attributes, record_info(fields, archive_msg)}],
+    rpc:call(?NODE, mnesia, create_table, [archive_msg, TabDef]),
+
+    ImportMsg = fun(#mam_msg{key = {{U, S}, ID},
+			     time = TS,
+			     route = Direction,
+			     from = {FromU, FromS, FromR},
+			     to = {ToU, ToS, ToR},
+			     stanza = Msg},
+		    {ok, N}) ->
+			{PeerU, PeerS, PeerR} =
+			    case Direction of
+				incoming -> {FromU, FromS, FromR};
+				outgoing -> {ToU, ToS, ToR}
+			    end,
+			Record = #archive_msg{us = {U, S},
+					      id = integer_to_binary(ID),
+					      timestamp = TS,
+					      peer = {PeerU, PeerS, PeerR},
+					      bare_peer = {PeerU, PeerS, <<>>},
+					      type = chat,
+					      nick = <<>>,
+					      packet = Msg},
+			case N rem 100 of
+			    0 -> io:put_chars(".");
+			    _ -> ok
+			end,
+			{mnesia:write(Record), N + 1}
+		end,
+    ImportTab = fun() ->
+			mnesia:foldl(ImportMsg, {ok, 0}, mam_msg)
+		end,
+
+    Start = get_timestamp(),
+    io:put_chars("Please wait "),
+    {ok, N} = rpc:call(?NODE, mnesia, activity,
+		       [sync_dirty, ImportTab, [], mnesia_frag]),
+    {atomic, ok} = rpc:call(?NODE, mnesia, delete_table, [mam_msg]),
+    {atomic, ok} = rpc:call(?NODE, mnesia, delete_table, [mam_meta]),
+    End = get_timestamp(),
+
+    io:fwrite("~nImported ~B messages in ~.1f minutes.~n",
+	      [N, (End - Start) / 60]).
