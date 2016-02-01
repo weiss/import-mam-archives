@@ -24,10 +24,15 @@
 -record(archive_msg, {us, id, timestamp, peer, bare_peer, packet, nick, type}).
 -record(mam_msg, {key, time, route, from, to, stanza}).
 
+usage(IoDevice, ExitStatus) ->
+    ok = io:put_chars(IoDevice, "Usage: import-mam-archives [days]"),
+    ok = io:nl(IoDevice),
+    halt(ExitStatus).
+
 get_timestamp() ->
     calendar:datetime_to_gregorian_seconds(calendar:universal_time()).
 
-main(_Args) ->
+import(MinTS) ->
     TabDef = [{disc_only_copies, [?NODE]},
 	      {type, bag},
 	      {attributes, record_info(fields, archive_msg)}],
@@ -39,7 +44,8 @@ main(_Args) ->
 			     from = {FromU, FromS, FromR},
 			     to = {ToU, ToS, ToR},
 			     stanza = Msg},
-		    {ok, N}) ->
+		    {ok, N}) when MinTS =:= undefined;
+				  TS > MinTS ->
 			{PeerU, PeerS, PeerR} =
 			    case Direction of
 				incoming -> {FromU, FromS, FromR};
@@ -57,7 +63,9 @@ main(_Args) ->
 			    0 -> io:put_chars(".");
 			    _ -> ok
 			end,
-			{mnesia:write(Record), N + 1}
+			{mnesia:write(Record), N + 1};
+		   (#mam_msg{}, {ok, N}) ->
+			{ok, N}
 		end,
     ImportTab = fun() ->
 			mnesia:foldl(ImportMsg, {ok, 0}, mam_msg)
@@ -73,3 +81,23 @@ main(_Args) ->
 
     io:fwrite("~nImported ~B messages in ~.1f minutes.~n",
 	      [N, (End - Start) / 60]).
+
+main(["-h"]) ->
+    usage(standard_io, 0);
+main([]) ->
+    import(undefined);
+main([Days]) ->
+    Secs = try
+	       D = list_to_integer(Days),
+	       true = D > 0,
+	       true = D < 10000,
+	       D * 86400
+	   catch
+	       _:_ -> usage(standard_error, 2)
+	   end,
+    {MS, S, US} = os:timestamp(),
+    CurS = MS * 1000000 + S,
+    MinS = CurS - Secs,
+    import({MinS div 1000000, MinS rem 1000000, US});
+main(_Garbage) ->
+    usage(standard_error, 2).
